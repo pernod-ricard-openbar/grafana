@@ -142,10 +142,12 @@ var (
 	appliedCommandLineProperties []string
 	appliedEnvOverrides          []string
 
-	ReportingEnabled   bool
-	CheckForUpdates    bool
-	GoogleAnalyticsId  string
-	GoogleTagManagerId string
+	// analytics
+	ReportingEnabled     bool
+	ReportingDistributor string
+	CheckForUpdates      bool
+	GoogleAnalyticsId    string
+	GoogleTagManagerId   string
 
 	// LDAP
 	LDAPEnabled           bool
@@ -816,10 +818,14 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	cfg.MetricsEndpointDisableTotalStats = iniFile.Section("metrics").Key("disable_total_stats").MustBool(false)
 
 	analytics := iniFile.Section("analytics")
-	ReportingEnabled = analytics.Key("reporting_enabled").MustBool(true)
 	CheckForUpdates = analytics.Key("check_for_updates").MustBool(true)
 	GoogleAnalyticsId = analytics.Key("google_analytics_ua_id").String()
 	GoogleTagManagerId = analytics.Key("google_tag_manager_id").String()
+	ReportingEnabled = analytics.Key("reporting_enabled").MustBool(true)
+	ReportingDistributor = analytics.Key("reporting_distributor").MustString("grafana-labs")
+	if len(ReportingDistributor) >= 100 {
+		ReportingDistributor = ReportingDistributor[:100]
+	}
 
 	if err := readAlertingSettings(iniFile); err != nil {
 		return err
@@ -1193,7 +1199,9 @@ func readUserSettings(iniFile *ini.File, cfg *Cfg) error {
 	hiddenUsers := users.Key("hidden_users").MustString("")
 	for _, user := range strings.Split(hiddenUsers, ",") {
 		user = strings.TrimSpace(user)
-		cfg.HiddenUsers[user] = struct{}{}
+		if user != "" {
+			cfg.HiddenUsers[user] = struct{}{}
+		}
 	}
 
 	return nil
