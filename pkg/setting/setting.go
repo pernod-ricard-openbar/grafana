@@ -12,12 +12,15 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/prometheus/common/model"
 	ini "gopkg.in/ini.v1"
 
+	"github.com/grafana/grafana-aws-sdk/pkg/awsds"
 	"github.com/grafana/grafana/pkg/components/gtime"
 	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/util"
@@ -46,6 +49,9 @@ const (
 	authProxySyncTTL = 60
 )
 
+// zoneInfo names environment variable for setting the path to look for the timezone database in go
+const zoneInfo = "ZONEINFO"
+
 var (
 	// App settings.
 	Env              = Dev
@@ -67,7 +73,6 @@ var (
 
 	// Paths
 	HomePath       string
-	PluginsPath    string
 	CustomInitPath = "conf/custom.ini"
 
 	// HTTP server options
@@ -141,10 +146,12 @@ var (
 	appliedCommandLineProperties []string
 	appliedEnvOverrides          []string
 
-	ReportingEnabled   bool
-	CheckForUpdates    bool
-	GoogleAnalyticsId  string
-	GoogleTagManagerId string
+	// analytics
+	ReportingEnabled     bool
+	ReportingDistributor string
+	CheckForUpdates      bool
+	GoogleAnalyticsId    string
+	GoogleTagManagerId   string
 
 	// LDAP
 	LDAPEnabled           bool
@@ -197,6 +204,10 @@ type Cfg struct {
 	SocketPath       string
 	RouterLogging    bool
 	Domain           string
+	CDNRootURL       *url.URL
+	ReadTimeout      time.Duration
+	EnableGzip       bool
+	EnforceDomain    bool
 
 	// build
 	BuildVersion string
@@ -212,6 +223,7 @@ type Cfg struct {
 	ProvisioningPath   string
 	DataPath           string
 	LogsPath           string
+	PluginsPath        string
 	BundledPluginsPath string
 
 	// SMTP email settings
@@ -270,6 +282,11 @@ type Cfg struct {
 	AdminUser                    string
 	AdminPassword                string
 
+	// AWS Plugin Auth
+	AWSAllowedAuthProviders []string
+	AWSAssumeRoleEnabled    bool
+	AWSListMetricsPageLimit int
+
 	// Auth proxy settings
 	AuthProxyEnabled          bool
 	AuthProxyHeaderName       string
@@ -311,6 +328,7 @@ type Cfg struct {
 	HiddenUsers           map[string]struct{}
 
 	// Annotations
+	AnnotationCleanupJobBatchSize      int64
 	AlertingAnnotationCleanupSetting   AnnotationCleanupSettings
 	DashboardAnnotationCleanupSettings AnnotationCleanupSettings
 	APIAnnotationCleanupSettings       AnnotationCleanupSettings
@@ -464,6 +482,9 @@ func (cfg *Cfg) readGrafanaEnvironmentMetrics() error {
 }
 
 func (cfg *Cfg) readAnnotationSettings() {
+	section := cfg.Raw.Section("annotations")
+	cfg.AnnotationCleanupJobBatchSize = section.Key("cleanupjob_batchsize").MustInt64(100)
+
 	dashboardAnnotation := cfg.Raw.Section("annotations.dashboard")
 	apiIAnnotation := cfg.Raw.Section("annotations.api")
 	alertingSection := cfg.Raw.Section("alerting")
@@ -737,6 +758,14 @@ func (cfg *Cfg) validateStaticRootPath() error {
 func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	setHomePath(args)
 
+	// Fix for missing IANA db on Windows
+	_, zoneInfoSet := os.LookupEnv(zoneInfo)
+	if runtime.GOOS == "windows" && !zoneInfoSet {
+		if err := os.Setenv(zoneInfo, filepath.Join(HomePath, "tools", "zoneinfo.zip")); err != nil {
+			cfg.Logger.Error("Can't set ZONEINFO environment variable", "err", err)
+		}
+	}
+
 	iniFile, err := cfg.loadConfiguration(args)
 	if err != nil {
 		return err
@@ -762,12 +791,12 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	cfg.Env = Env
 	InstanceName = valueAsString(iniFile.Section(""), "instance_name", "unknown_instance_name")
 	plugins := valueAsString(iniFile.Section("paths"), "plugins", "")
-	PluginsPath = makeAbsolute(plugins, HomePath)
+	cfg.PluginsPath = makeAbsolute(plugins, HomePath)
 	cfg.BundledPluginsPath = makeAbsolute("plugins-bundled", HomePath)
 	provisioning := valueAsString(iniFile.Section("paths"), "provisioning", "")
 	cfg.ProvisioningPath = makeAbsolute(provisioning, HomePath)
 
-	if err := readServerSettings(iniFile, cfg); err != nil {
+	if err := cfg.readServerSettings(iniFile); err != nil {
 		return err
 	}
 
@@ -814,10 +843,14 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	cfg.MetricsEndpointDisableTotalStats = iniFile.Section("metrics").Key("disable_total_stats").MustBool(false)
 
 	analytics := iniFile.Section("analytics")
-	ReportingEnabled = analytics.Key("reporting_enabled").MustBool(true)
 	CheckForUpdates = analytics.Key("check_for_updates").MustBool(true)
 	GoogleAnalyticsId = analytics.Key("google_analytics_ua_id").String()
 	GoogleTagManagerId = analytics.Key("google_tag_manager_id").String()
+	ReportingEnabled = analytics.Key("reporting_enabled").MustBool(true)
+	ReportingDistributor = analytics.Key("reporting_distributor").MustString("grafana-labs")
+	if len(ReportingDistributor) >= 100 {
+		ReportingDistributor = ReportingDistributor[:100]
+	}
 
 	if err := readAlertingSettings(iniFile); err != nil {
 		return err
@@ -854,6 +887,7 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	}
 
 	cfg.readLDAPConfig()
+	cfg.handleAWSConfig()
 	cfg.readSessionConfig()
 	cfg.readSmtpSettings()
 	cfg.readQuotaSettings()
@@ -916,6 +950,29 @@ func (cfg *Cfg) readLDAPConfig() {
 	cfg.LDAPAllowSignup = LDAPAllowSignup
 }
 
+func (cfg *Cfg) handleAWSConfig() {
+	awsPluginSec := cfg.Raw.Section("aws")
+	cfg.AWSAssumeRoleEnabled = awsPluginSec.Key("assume_role_enabled").MustBool(true)
+	allowedAuthProviders := awsPluginSec.Key("allowed_auth_providers").MustString("default,keys,credentials")
+	for _, authProvider := range strings.Split(allowedAuthProviders, ",") {
+		authProvider = strings.TrimSpace(authProvider)
+		if authProvider != "" {
+			cfg.AWSAllowedAuthProviders = append(cfg.AWSAllowedAuthProviders, authProvider)
+		}
+	}
+	cfg.AWSListMetricsPageLimit = awsPluginSec.Key("list_metrics_page_limit").MustInt(500)
+	// Also set environment variables that can be used by core plugins
+	err := os.Setenv(awsds.AssumeRoleEnabledEnvVarKeyName, strconv.FormatBool(cfg.AWSAssumeRoleEnabled))
+	if err != nil {
+		cfg.Logger.Error(fmt.Sprintf("could not set environment variable '%s'", awsds.AssumeRoleEnabledEnvVarKeyName), err)
+	}
+
+	err = os.Setenv(awsds.AllowedAuthProvidersEnvVarKeyName, allowedAuthProviders)
+	if err != nil {
+		cfg.Logger.Error(fmt.Sprintf("could not set environment variable '%s'", awsds.AllowedAuthProvidersEnvVarKeyName), err)
+	}
+}
+
 func (cfg *Cfg) readSessionConfig() {
 	sec, _ := cfg.Raw.GetSection("session")
 
@@ -962,7 +1019,7 @@ func (cfg *Cfg) LogConfigSources() {
 	cfg.Logger.Info("Path Home", "path", HomePath)
 	cfg.Logger.Info("Path Data", "path", cfg.DataPath)
 	cfg.Logger.Info("Path Logs", "path", cfg.LogsPath)
-	cfg.Logger.Info("Path Plugins", "path", PluginsPath)
+	cfg.Logger.Info("Path Plugins", "path", cfg.PluginsPath)
 	cfg.Logger.Info("Path Provisioning", "path", cfg.ProvisioningPath)
 	cfg.Logger.Info("App mode " + cfg.Env)
 }
@@ -1189,7 +1246,9 @@ func readUserSettings(iniFile *ini.File, cfg *Cfg) error {
 	hiddenUsers := users.Key("hidden_users").MustString("")
 	for _, user := range strings.Split(hiddenUsers, ",") {
 		user = strings.TrimSpace(user)
-		cfg.HiddenUsers[user] = struct{}{}
+		if user != "" {
+			cfg.HiddenUsers[user] = struct{}{}
+		}
 	}
 
 	return nil
@@ -1251,7 +1310,7 @@ func readSnapshotsSettings(cfg *Cfg, iniFile *ini.File) error {
 	return nil
 }
 
-func readServerSettings(iniFile *ini.File, cfg *Cfg) error {
+func (cfg *Cfg) readServerSettings(iniFile *ini.File) error {
 	server := iniFile.Section("server")
 	var err error
 	AppUrl, AppSubUrl, err = parseAppUrlAndSubUrl(server)
@@ -1263,8 +1322,8 @@ func readServerSettings(iniFile *ini.File, cfg *Cfg) error {
 	cfg.AppURL = AppUrl
 	cfg.AppSubURL = AppSubUrl
 	cfg.ServeFromSubPath = ServeFromSubPath
-
 	cfg.Protocol = HTTPScheme
+
 	protocolStr := valueAsString(server, "protocol", "http")
 
 	if protocolStr == "https" {
@@ -1297,7 +1356,34 @@ func readServerSettings(iniFile *ini.File, cfg *Cfg) error {
 		return err
 	}
 
+	cdnURL := valueAsString(server, "cdn_url", "")
+	if cdnURL != "" {
+		cfg.CDNRootURL, err = url.Parse(cdnURL)
+		if err != nil {
+			return err
+		}
+	}
+
+	cfg.ReadTimeout = server.Key("read_timeout").MustDuration(0)
+
 	return nil
+}
+
+// GetContentDeliveryURL returns full content delivery URL with /<edition>/<version> added to URL
+func (cfg *Cfg) GetContentDeliveryURL(prefix string) string {
+	if cfg.CDNRootURL != nil {
+		url := *cfg.CDNRootURL
+		preReleaseFolder := ""
+
+		if strings.Contains(cfg.BuildVersion, "pre") || strings.Contains(cfg.BuildVersion, "alpha") {
+			preReleaseFolder = "pre-releases"
+		}
+
+		url.Path = path.Join(url.Path, prefix, preReleaseFolder, cfg.BuildVersion)
+		return url.String() + "/"
+	}
+
+	return ""
 }
 
 func (cfg *Cfg) readDataSourcesSettings() {

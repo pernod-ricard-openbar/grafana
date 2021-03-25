@@ -9,9 +9,11 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/grafana/grafana-aws-sdk/pkg/awsds"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/models"
@@ -51,12 +53,13 @@ type Manager interface {
 }
 
 type manager struct {
-	Cfg            *setting.Cfg     `inject:""`
-	License        models.Licensing `inject:""`
-	pluginsMu      sync.RWMutex
-	plugins        map[string]Plugin
-	logger         log.Logger
-	pluginSettings map[string]pluginSettings
+	Cfg                    *setting.Cfg                  `inject:""`
+	License                models.Licensing              `inject:""`
+	PluginRequestValidator models.PluginRequestValidator `inject:""`
+	pluginsMu              sync.RWMutex
+	plugins                map[string]Plugin
+	logger                 log.Logger
+	pluginSettings         map[string]pluginSettings
 }
 
 func (m *manager) Init() error {
@@ -107,6 +110,8 @@ func (m *manager) Register(pluginID string, factory PluginFactoryFunc) error {
 		}
 	}
 
+	hostEnv = append(hostEnv, m.getAWSEnvironmentVariables()...)
+
 	env := pluginSettings.ToEnv("GF_PLUGIN", hostEnv)
 
 	pluginLogger := m.logger.New("pluginId", pluginID)
@@ -118,6 +123,18 @@ func (m *manager) Register(pluginID string, factory PluginFactoryFunc) error {
 	m.plugins[pluginID] = plugin
 	m.logger.Debug("Backend plugin registered", "pluginId", pluginID)
 	return nil
+}
+
+func (m *manager) getAWSEnvironmentVariables() []string {
+	variables := []string{}
+	if m.Cfg.AWSAssumeRoleEnabled {
+		variables = append(variables, awsds.AssumeRoleEnabledEnvVarKeyName+"=true")
+	}
+	if len(m.Cfg.AWSAllowedAuthProviders) > 0 {
+		variables = append(variables, awsds.AllowedAuthProvidersEnvVarKeyName+"="+strings.Join(m.Cfg.AWSAllowedAuthProviders, ","))
+	}
+
+	return variables
 }
 
 // start starts all managed backend plugins
@@ -195,6 +212,19 @@ func (m *manager) CollectMetrics(ctx context.Context, pluginID string) (*backend
 
 // CheckHealth checks the health of a registered backend plugin.
 func (m *manager) CheckHealth(ctx context.Context, pluginContext backend.PluginContext) (*backend.CheckHealthResult, error) {
+	var dsURL string
+	if pluginContext.DataSourceInstanceSettings != nil {
+		dsURL = pluginContext.DataSourceInstanceSettings.URL
+	}
+
+	err := m.PluginRequestValidator.Validate(dsURL, nil)
+	if err != nil {
+		return &backend.CheckHealthResult{
+			Status:  http.StatusForbidden,
+			Message: "Access denied",
+		}, nil
+	}
+
 	m.pluginsMu.RLock()
 	p, registered := m.plugins[pluginContext.PluginID]
 	m.pluginsMu.RUnlock()
@@ -204,13 +234,17 @@ func (m *manager) CheckHealth(ctx context.Context, pluginContext backend.PluginC
 	}
 
 	var resp *backend.CheckHealthResult
-	err := instrumentCheckHealthRequest(p.PluginID(), func() (innerErr error) {
+	err = instrumentCheckHealthRequest(p.PluginID(), func() (innerErr error) {
 		resp, innerErr = p.CheckHealth(ctx, &backend.CheckHealthRequest{PluginContext: pluginContext})
 		return
 	})
 
 	if err != nil {
 		if errors.Is(err, ErrMethodNotImplemented) {
+			return nil, err
+		}
+
+		if errors.Is(err, ErrPluginUnavailable) {
 			return nil, err
 		}
 
@@ -262,13 +296,17 @@ func (m *manager) callResourceInternal(w http.ResponseWriter, req *http.Request,
 		childCtx, cancel := context.WithCancel(req.Context())
 		defer cancel()
 		stream := newCallResourceResponseStream(childCtx)
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+
 		defer func() {
 			if err := stream.Close(); err != nil {
 				m.logger.Warn("Failed to close stream", "err", err)
 			}
+			wg.Wait()
 		}()
-		var wg sync.WaitGroup
-		wg.Add(1)
+
 		var flushStreamErr error
 		go func() {
 			flushStreamErr = flushStream(p, stream, w)
@@ -278,11 +316,6 @@ func (m *manager) callResourceInternal(w http.ResponseWriter, req *http.Request,
 		if err := p.CallResource(req.Context(), crReq, stream); err != nil {
 			return err
 		}
-		if err := stream.Close(); err != nil {
-			return err
-		}
-
-		wg.Wait()
 
 		return flushStreamErr
 	})
@@ -290,6 +323,17 @@ func (m *manager) callResourceInternal(w http.ResponseWriter, req *http.Request,
 
 // CallResource calls a plugin resource.
 func (m *manager) CallResource(pCtx backend.PluginContext, reqCtx *models.ReqContext, path string) {
+	var dsURL string
+	if pCtx.DataSourceInstanceSettings != nil {
+		dsURL = pCtx.DataSourceInstanceSettings.URL
+	}
+
+	err := m.PluginRequestValidator.Validate(dsURL, reqCtx.Req.Request)
+	if err != nil {
+		reqCtx.JsonApiErr(http.StatusForbidden, "Access denied", err)
+		return
+	}
+
 	clonedReq := reqCtx.Req.Clone(reqCtx.Req.Context())
 	rawURL := path
 	if clonedReq.URL.RawQuery != "" {

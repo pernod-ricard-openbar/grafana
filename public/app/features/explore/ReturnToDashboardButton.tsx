@@ -10,6 +10,7 @@ import { StoreState } from 'app/types';
 import { ExploreId } from 'app/types/explore';
 import { updateLocation } from 'app/core/actions';
 import { setDashboardQueriesToUpdateOnLoad } from '../dashboard/state/reducers';
+import { isSplit } from './state/selectors';
 
 interface Props {
   exploreId: ExploreId;
@@ -66,7 +67,7 @@ export const UnconnectedReturnToDashboardButton: FC<Props> = ({
   };
 
   return (
-    <ButtonGroup className="explore-toolbar-content-item" noSpacing>
+    <ButtonGroup>
       <Tooltip content={'Return to panel'} placement="bottom">
         <ToolbarButton data-testid="returnButton" title={'Return to panel'} onClick={() => returnToPanel()}>
           <Icon name="arrow-left" />
@@ -76,7 +77,6 @@ export const UnconnectedReturnToDashboardButton: FC<Props> = ({
         data-testid="returnButtonWithChanges"
         options={[{ label: 'Return to panel with changes', value: '' }]}
         onChange={() => returnToPanel({ withChanges: true })}
-        maxMenuHeight={380}
       />
     </ButtonGroup>
   );
@@ -84,8 +84,8 @@ export const UnconnectedReturnToDashboardButton: FC<Props> = ({
 
 function mapStateToProps(state: StoreState, { exploreId }: { exploreId: ExploreId }) {
   const explore = state.explore;
-  const splitted = state.explore.split;
-  const { datasourceInstance, queries, originPanelId } = explore[exploreId];
+  const splitted = isSplit(state);
+  const { datasourceInstance, queries, originPanelId } = explore[exploreId]!;
 
   return {
     exploreId,

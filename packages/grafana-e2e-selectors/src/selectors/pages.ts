@@ -34,10 +34,6 @@ export const Pages = {
   },
   Dashboard: {
     url: (uid: string) => `/d/${uid}`,
-    Toolbar: {
-      toolbarItems: (button: string) => `Dashboard navigation bar button ${button}`,
-      navBar: () => '.navbar',
-    },
     SubMenu: {
       submenuItem: 'Dashboard template variables submenu item',
       submenuItemLabels: (item: string) => `Dashboard template variables submenu Label ${item}`,
@@ -58,12 +54,12 @@ export const Pages = {
       },
       Annotations: {
         List: {
-          addAnnotationCTA: 'Call to action button Add Annotation Query',
+          addAnnotationCTA: Components.CallToActionCard.button('Add Annotation Query'),
         },
       },
       Variables: {
         List: {
-          addVariableCTA: 'Call to action button Add variable',
+          addVariableCTA: Components.CallToActionCard.button('Add variable'),
           newButton: 'Variable editor New variable button',
           table: 'Variable editor Table',
           tableRowNameFields: (variableName: string) => `Variable editor Table Name field ${variableName}`,
@@ -130,6 +126,7 @@ export const Pages = {
       container: 'Explore',
       graph: 'Explore Graph',
       table: 'Explore Table',
+      scrollBar: () => '.scrollbar-view',
     },
     Toolbar: {
       navBar: () => '.explore-toolbar',
