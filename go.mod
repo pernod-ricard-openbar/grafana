@@ -39,7 +39,7 @@ require (
 	github.com/gobwas/glob v0.2.3
 	github.com/golang/mock v1.4.4
 	github.com/golang/protobuf v1.4.3
-	github.com/google/go-cmp v0.5.4
+	github.com/google/go-cmp v0.5.7
 	github.com/google/uuid v1.1.5
 	github.com/gosimple/slug v1.9.0
 	github.com/grafana/grafana-plugin-model v0.0.0-20190930120109-1fc953a61fb4
@@ -81,12 +81,11 @@ require (
 	github.com/xorcare/pointer v1.1.0
 	github.com/yudai/gojsondiff v1.0.0
 	golang.org/x/crypto v0.0.0-20201208171446-5f87f3452ae9
-	golang.org/x/net v0.0.0-20201022231255-08b38378de70
+	golang.org/x/net v0.0.0-20211015210444-4f30a5c0130f
 	golang.org/x/oauth2 v0.0.0-20200902213428-5d25da1a8d43
-	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9
-	golang.org/x/sys v0.0.0-20201022201747-fb209a7c41cd // indirect
+	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/time v0.0.0-20200630173020-3af7569d3a1e
-	gonum.org/v1/gonum v0.6.0
+	gonum.org/v1/gonum v0.12.0
 	google.golang.org/api v0.33.0
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/genproto v0.0.0-20201022181438-0ff5f38871d5 // indirect
