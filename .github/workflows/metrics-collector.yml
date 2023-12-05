@@ -11,7 +11,7 @@
 name: Github issue metrics collection
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "0 0 1 * *"
   issues:
     types: [opened, closed]
 
